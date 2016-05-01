@@ -12,6 +12,8 @@ import (
         "github.com/hybridgroup/gobot/platforms/gpio"
         "github.com/dsockwell/gobot/platforms/i2c"
 
+        "github.com/felixge/pidctrl"
+
 	// ui "github.com/gizak/termui"
 )
 
@@ -38,6 +40,7 @@ var (
 	minFanSpeed 		uint8
 	ledIncrement		uint8
 	fanIncrement		uint8
+
 )
 
 func LogInit(
@@ -77,66 +80,14 @@ func AtmoInit () {
 	maxTemp	= float32(34.0)
 	minTemp	= float32(30.0)
 	minRH  	= float32(75.0)
-	maxRH  	= float32(80.0)
+	maxRH  	= float32(90.0)
 
 	maxFanSpeed	= uint8(90)
 	minFanSpeed	= uint8(65)
 
 	ledIncrement 	= uint8(1)
 	fanIncrement	= uint8(1)
-	
 }
-
-/*
-func PanelInit() {
-	// linechart for temperature
-	LCTempM := ui.NewLineChart()
-	LCTempM.BorderLabel = "Temperature (C) - Minute"
-	LCTempM.Mode = "dot"
-	LCTempM.Data = make([]float64, 60)
-
-	LCTempH := ui.NewLineChart()
-	LCTempH.BorderLabel = "Temperature (C) - Hour"
-	LCTempH.Mode = "dot"
-	LCTempH.Data = make([]float64, 60)
-	
-	// linechart for humidity
-	LCHumM := ui.NewLineChart()
-	LCHumM.BorderLabel = "Percent RH - Minute"
-	LCHumM.Mode = "dot"
-	LCHumM.Data = make([]float64, 60)
-
-	LCHumH := ui.NewLineChart()
-	LCHumH.BorderLabel = "Percent RH - Hour"
-	LCHumH.Mode = "dot"
-	LCHumH.Data = make([]float64, 60)
-	
-	// linechart for fanspeed
-	LCFanM := ui.NewLineChart()
-	LCFanM.BorderLabel = "Percent Fan Speed - Minute"
-	LCFanM.Mode = "dot"
-	LCFanM.Data = make([]float64, 60)
-
-	LCFanH := ui.NewLineChart()
-	LCFanH.BorderLabel = "Percent Fan Speed - Hour"
-	LCFanH.Mode = "dot"
-	LCFanH.Data = make([]float64, 60)
-	
-	ui.Body.AddRows(
-		ui.NewRow(
-			ui.NewCol(2, 0, LCTempH),
-			ui.NewCol(2, 0, LCTempM)),
-		ui.NewRow(
-			ui.NewCol(2, 0, LCHumH),
-			ui.NewCol(2, 0, LCHumM)),
-		ui.NewRow(
-			ui.NewCol(2, 0, LCFanH),
-			ui.NewCol(2, 0, LCFanM)))
-	ui.Body.Align()
-	ui.Render(ui.Body)
-}
-	
-*/
 
 func main() {
 
@@ -184,59 +135,49 @@ func main() {
 		tempInst	:= bme280.Temperature
 		humInst		:= bme280.Humidity
 
-                gobot.Every(1*time.Second, func() {
-			tempInst	= bme280.Temperature
-			humInst		= bme280.Humidity
-			
-			// function:
-			// Maximize light intensity
-			// Avoid max temp
-			// LifeRay controls temp
-			// Avoid min RH
-			// maintain minRH < RH < maxRH
-			// Fan controls RH
+		LifeRayPIDOut	:= 0.0
+		FanPIDOut	:= 0.0
 
+		LifeRayPID := pidctrl.NewPIDController(1.0, 1.0, 1.0)
+		LifeRayPID.Set(float64(maxTemp))
+		LifeRayPID.SetOutputLimits(0.25, 1.0)
+
+		FanPID := pidctrl.NewPIDController(1.0, 1.0, 1.0)
+		FanPID.Set(float64(maxRH))
+		FanPID.SetOutputLimits(0.5, 1.0)
+
+                gobot.Every(5*time.Second, func() {
+			tempInst	= bme280.Temperature
+			
 			if !daylight {
 				return
 			}
 
+			// From here, use PIDs!
+
 			if tempInst > maxTemp {
 				Warning.Println("[!] High temperature", tempInst)
-				// cool down		
-				if LRBrightness > minLRBrightness  {
-					LRBrightness = minLRBrightness
-					Warning.Println("[*] LifeRay intensity decreased to",
-							 LRBrightness)
-				}
-			} else if LRBrightness > 0 && LRBrightness < maxLRBrightness {
-				LRBrightness += ledIncrement
 			}
-			if LRBrightness < 0 {
-				LRBrightness = 0
-			}
-			if LRBrightness > maxLRBrightness {
-				LRBrightness = maxLRBrightness
-			}
-		})
-                gobot.Every(10*time.Second, func() {
+			LifeRayPIDOut = LifeRayPID.Update(float64(tempInst))
+			// LifeRayPIDOut = LifeRayPID.UpdateDuration(float64(tempInst), 5*time.Second)
+			Trace.Println("[=] LifeRay PID output", LifeRayPIDOut)
+			LRBrightness = uint8(LifeRayPIDOut * 255)
 			
-			fan.Brightness(fanspeed)
+		})
+
+                gobot.Every(5*time.Second, func() {
+			humInst		= bme280.Humidity
+			
 
 			if humInst < minRH && fanspeed > minFanSpeed {
 				Warning.Println("[!] Low RH", humInst)
-				fanspeed = minFanSpeed
-				Warning.Println("[*] Fan speed decreased to", fanspeed)
-			} else if humInst > minRH {
-				fanspeed += fanIncrement
 			}
-				
-
-			if fanspeed < minFanSpeed {
-				fanspeed = minFanSpeed
-			}
-			if fanspeed > maxFanSpeed {
-				fanspeed = maxFanSpeed
-			}
+			FanPIDOut = FanPID.Update(float64(humInst))
+			// FanPIDOut = FanPID.UpdateDuration(float64(humInst), 1*time.Second)
+			FanPIDOut = 1 - FanPIDOut
+			Trace.Println("[=] Fan PID output", FanPIDOut)
+			fanspeed = uint8(FanPIDOut * 255)
+			fan.Brightness(fanspeed)
 
 		})
 
